@@ -1,4 +1,4 @@
-# 🍑 English Practice for Armenian Beginners
+# English Practice for Armenian Beginners
 ### Անգլերենի վարժություններ հայ սկսնակների համար
 
 An interactive, colorful practice app for Armenian speakers learning English with the
