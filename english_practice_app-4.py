@@ -151,29 +151,42 @@ def tts_buttons(sentence: str, uid: str, spell_word: str = None, listen: bool = 
     buttons = ""
     if listen:
         buttons += f"""
-          <button onclick="say_{uid}({json.dumps(sentence)}, 0.85)"
+          <button id="listen_{uid}"
                   style="background:#3E7CB1;color:white;border:none;border-radius:999px;
                          padding:5px 13px;cursor:pointer;font-weight:700;">
             🔊 Listen · Լսել
           </button>"""
     if spell_word:
-        letters = ", ".join(list(spell_word.replace("'", " apostrophe ").upper()))
         buttons += f"""
-          <button onclick="say_{uid}({json.dumps(letters)}, 0.55)"
+          <button id="spell_{uid}"
                   style="background:#C0316E;color:white;border:none;border-radius:999px;
                          padding:5px 13px;cursor:pointer;font-weight:700;">
             🔤 Spell · Հեգել
           </button>"""
+    letters = ""
+    if spell_word:
+        letters = ", ".join(list(spell_word.replace("'", " apostrophe ").upper()))
     components.html(
         f"""
         <div style="display:flex; gap:8px; font-family:sans-serif;">{buttons}</div>
         <script>
-          function say_{uid}(text, rate) {{
-            window.speechSynthesis.cancel();
-            const u = new SpeechSynthesisUtterance(text);
-            u.lang = 'en-US'; u.rate = rate;
-            window.speechSynthesis.speak(u);
+          function speak_{uid}(text, rate) {{
+            try {{
+              window.speechSynthesis.cancel();
+              var u = new SpeechSynthesisUtterance(text);
+              u.lang = 'en-US';
+              u.rate = rate;
+              window.speechSynthesis.speak(u);
+            }} catch (e) {{ console.log(e); }}
           }}
+          var lb = document.getElementById("listen_{uid}");
+          if (lb) lb.addEventListener("click", function() {{
+            speak_{uid}({json.dumps(sentence)}, 0.85);
+          }});
+          var sb = document.getElementById("spell_{uid}");
+          if (sb) sb.addEventListener("click", function() {{
+            speak_{uid}({json.dumps(letters)}, 0.55);
+          }});
         </script>
         """,
         height=44,
@@ -925,6 +938,14 @@ if "celebrated" not in st.session_state:
 
 db = st.session_state.db
 
+
+def _clear_session_widgets():
+    """Remove navigation + answer widget state (used when changing profiles)."""
+    for k in list(st.session_state.keys()):
+        ks = str(k)
+        if ks == "level_sel" or ks.startswith("topic_sel_") or re.match(r".+_q\d+$", ks):
+            st.session_state.pop(k, None)
+
 # ---------------------------------------------------------------- profile page
 if st.session_state.profile is None or st.session_state.profile not in db["profiles"]:
     st.markdown(
@@ -951,6 +972,7 @@ if st.session_state.profile is None or st.session_state.profile not in db["profi
                     unsafe_allow_html=True,
                 )
                 if st.button("Մուտք · Enter", key=f"login_{name}", use_container_width=True):
+                    _clear_session_widgets()
                     st.session_state.profile = name
                     st.session_state.celebrated = {}
                     st.rerun()
@@ -974,6 +996,7 @@ if st.session_state.profile is None or st.session_state.profile not in db["profi
             else:
                 profiles[name] = {"avatar": avatar, "answers": {}, "completed": {}}
                 save_db()
+                _clear_session_widgets()
                 st.session_state.profile = name
                 st.session_state.celebrated = {}
                 st.rerun()
@@ -1045,18 +1068,44 @@ with st.sidebar:
     n_trophies = len(prof["completed"])
     st.caption(f"🏆 Ավարտված վարժություններ՝ {n_trophies}")
     if st.button("🔁 Փոխել պրոֆիլը · Switch profile"):
+        _clear_session_widgets()
         st.session_state.profile = None
         st.rerun()
     st.markdown("---")
 
-    level_name = st.selectbox("🎚️ Դասագրքի բաժինը · Book File", list(LEVELS.keys()))
+    # --- resume where this learner left off ---
+    last = prof.get("last", {})
+    if "level_sel" not in st.session_state and last.get("level") in LEVELS:
+        st.session_state["level_sel"] = last["level"]
+
+    def _level_label(name):
+        topics = LEVELS[name]
+        done = sum(1 for tid in topics if prof["completed"].get(tid))
+        return f"{name} · 🏆{done}/{len(topics)}"
+
+    level_name = st.selectbox("🎚️ Դասագրքի բաժինը · Book File", list(LEVELS.keys()),
+                              key="level_sel", format_func=_level_label)
     level = LEVELS[level_name]
+
+    topic_widget_key = f"topic_sel_{level_name}"
+    if (topic_widget_key not in st.session_state
+            and last.get("level") == level_name and last.get("topic") in level):
+        st.session_state[topic_widget_key] = last["topic"]
 
     selected = st.radio(
         "📚 Վարժություն · Exercise",
         options=list(level.keys()),
-        format_func=lambda tid: f"{level[tid]['emoji']} {level[tid]['title']}",
+        key=topic_widget_key,
+        format_func=lambda tid: (
+            f"{'🏆 ' if prof['completed'].get(tid) else ''}"
+            f"{level[tid]['emoji']} {level[tid]['title']}"
+        ),
     )
+
+    # remember the current position for next time
+    if prof.get("last") != {"level": level_name, "topic": selected}:
+        prof["last"] = {"level": level_name, "topic": selected}
+        save_db()
 
     st.markdown("---")
     st.markdown("### ⭐ Այս բաժնի առաջընթացը")
@@ -1089,12 +1138,14 @@ with st.sidebar:
 topic = level[selected]
 mode = topic["mode"]
 c_correct, c_answered, c_total = question_status(selected, topic)
+done_badge = ("<span class='ef-badge'>🏆 Ավարտված · Completed</span> &nbsp;"
+              if prof["completed"].get(selected) else "")
 
 st.markdown(
     f"""
     <div class="hero">
       <h1>{topic['emoji']} {topic['title']}</h1>
-      <p><span class="ef-badge">📖 {topic['ef']}</span> &nbsp; {topic['title_hy']} ·
+      <p><span class="ef-badge">📖 {topic['ef']}</span> &nbsp; {done_badge}{topic['title_hy']} ·
       ✅ Ինքնաստուգում · Ճիշտ՝ {c_correct}/{c_total}</p>
     </div>
     """,
