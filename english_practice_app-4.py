@@ -16,6 +16,7 @@ import json
 import re
 from pathlib import Path
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -906,10 +907,43 @@ LEVELS = {
 }
 
 # ---------------------------------------------------------------- persistence
+# Progress is stored in Supabase (cloud database) when SUPABASE_URL and
+# SUPABASE_KEY are set in Streamlit secrets. Without them (e.g. running
+# locally), it falls back to a JSON file next to the app.
 DB_PATH = Path(__file__).parent / "english_progress.json"
+TABLE = "english_progress"
+
+
+def _supabase_cfg():
+    try:
+        return st.secrets["SUPABASE_URL"].rstrip("/"), st.secrets["SUPABASE_KEY"]
+    except Exception:
+        return None, None
+
+
+def _sb_headers(key):
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
 
 
 def load_db():
+    url, key = _supabase_cfg()
+    if url:
+        try:
+            r = requests.get(
+                f"{url}/rest/v1/{TABLE}?select=name,data",
+                headers=_sb_headers(key), timeout=10,
+            )
+            r.raise_for_status()
+            return {"profiles": {row["name"]: row["data"] for row in r.json()}}
+        except Exception:
+            st.error("⚠️ Չհաջողվեց կապվել տվյալների բազայի հետ։ Ստուգիր SUPABASE_URL / "
+                     "SUPABASE_KEY-ը Secrets-ում և թարմացրու էջը։")
+            st.stop()
+    # local fallback: JSON file next to the app
     try:
         data = json.loads(DB_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict) and "profiles" in data:
@@ -919,7 +953,25 @@ def load_db():
     return {"profiles": {}}
 
 
-def save_db():
+def save_db(profile: str = None):
+    """Save one profile (default: the active one) to Supabase,
+    or everything to the local file when Supabase is not configured."""
+    name = profile or st.session_state.get("profile")
+    url, key = _supabase_cfg()
+    if url:
+        if not name or name not in st.session_state.db["profiles"]:
+            return
+        try:
+            requests.post(
+                f"{url}/rest/v1/{TABLE}",
+                headers={**_sb_headers(key),
+                         "Prefer": "resolution=merge-duplicates,return=minimal"},
+                json=[{"name": name, "data": st.session_state.db["profiles"][name]}],
+                timeout=10,
+            ).raise_for_status()
+        except Exception:
+            st.sidebar.warning("⚠️ Չհաջողվեց պահպանել բազայում — ստուգիր ինտերնետ կապը։")
+        return
     try:
         DB_PATH.write_text(
             json.dumps(st.session_state.db, ensure_ascii=False, indent=1),
@@ -995,7 +1047,7 @@ if st.session_state.profile is None or st.session_state.profile not in db["profi
                 st.warning("Այս անունն արդեն կա — ընտրիր վերևից կամ գրիր այլ անուն։")
             else:
                 profiles[name] = {"avatar": avatar, "answers": {}, "completed": {}}
-                save_db()
+                save_db(name)
                 _clear_session_widgets()
                 st.session_state.profile = name
                 st.session_state.celebrated = {}
